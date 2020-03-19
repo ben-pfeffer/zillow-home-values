@@ -1,0 +1,545 @@
+---
+title: "Zillow Home Values"
+author: "Ben Pfeffer"
+date: "March 7, 2020"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 2
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(scales)
+key <- 'X1-ZWz1h7m2yrx72j_6bk45'
+```
+
+# Introduction
+
+In this project we will build a few models that attempt to predict the Zillow Zestimate home value of houses in the city of Los Angeles. 
+
+We begin with a CSV of all the home addresses in the city. This file is provided publically by the city of Los Angeles. You can view or download it [here](https://data.lacity.org/A-Well-Run-City/Addresses-in-the-City-of-Los-Angeles/4ca8-mxuh). 
+
+We will clean this data and use it to query the Zillow API for information on the homes. Since it is not feasable to query Zillow for every address in LA, we take a random sample from the list of addresses. We use the addresses in that sample to query the Zillow API. Information on homes that have at least a Zillow Zestimate value are written to a CSV file. 
+
+The Zillow API will give us data on home's Zestimate value, its tax assessment value, and many properties of the home including square footage, number of bedrooms and bathrooms, year built, and home type (ie single family, duplex, or condo). We will use these factors to train a model that predicts a home's Zillow Zestimate value.
+
+We take the information written to the CSV and use it to create three models that attempt to predict Zillow's Zestimate home value. In this project I use a linear regression, an elastic net regression, and a boosted tree model.
+
+Of the three models created, the boosted tree outperforms the regression models. There may be room for further improvement with more processing power and time, larger sample size, or collecting different variables from other sources.
+
+#Data Prep
+
+Our first step is to read in the home addresses file and drop the columns we don't need for this analysis
+```{r load addresses, cache=TRUE}
+address.data <- readr::read_csv('LA-addresses.csv', col_types = cols(UNIT_RANGE = col_character())) %>%
+  select(HSE_NBR:ZIP_CD)
+```
+
+The variables we keep from the LA addresses data set are:  
+* `HSE_NBR`	 - House Number  
+* `HSE_FRAC_NBR` - House Number Fraction  
+* `HSE_DIR_CD` - House Direction Code. The street direction
+* `STR_NM`	- Street Name  
+* `STR_SFX_CD` - Street Suffix  
+* `STR_SFX_DIR_CD` - Street Suffix Direction  
+* `UNIT_RANGE` - Unit Range  
+* `ZIP_CD`   - Zip Code  
+
+Below is the start of the data we are provided by the City of Los Angeles:
+```{r, echo=FALSE}
+address.data
+```
+
+Since the Zillow API only allows 5000 queries per day, we will select a random sample of the 1 million homes. We set our sample size to 5000. 
+```{r}
+sample.size <- 5000
+
+# get random sample of addresses to query from zillow
+sample <- sample(1:nrow(address.data), size = sample.size)
+address.sample <- address.data[sample, ]
+```
+
+The Zillow API wants 2 variables: an `address` (eg. 123 Main St.) and a `city/state/zip` variable (eg. Los Angeles, CA 12345). 
+
+Our next step is to clean the `address.sample` into the format required by the Zillow API. 
+```{r}
+# clean up address and city/state/zip data to match format expected by zillow API
+address.sample <- mutate(address.sample, clean.address = paste0(HSE_NBR, ' ', 
+                                                      ifelse(!is.na(HSE_FRAC_NBR), 
+                                                             HSE_FRAC_NBR, ''), ' ',
+                                                      STR_NM, ' ', STR_SFX_CD, ' ',
+                                                      ifelse(!is.na(STR_SFX_DIR_CD), 
+                                                             STR_SFX_DIR_CD, ''))) %>%
+                mutate(clean.citystatezip = paste('Los Angeles, CA', ZIP_CD)) %>% 
+                select(clean.address, clean.citystatezip)
+
+address.sample
+```
+
+The code above pastes the columnar data together in the correct order. For variables that are not always present (House Fraction Number and Street Directional Suffix) we conditionally input them only when they are present. 
+
+**One note about this setup:** we do not need to specify a unit for the multifamily addresses. The Zillow API returns information on all units at a address when no unit is supplied, and the code that follows will return the information for the first unit that Zillow gives us. Consequentially, multifamily units may be underrepresented in the sample as a percentage of total *dwellings*--but not as a percentage of total *buildings*. The sample may also be slightly unrepresentative if the first unit in a multifamily building tends to be larger or smaller than the other units. However, for the purposes of this project I think our method is sufficient for building a predictive model. 
+
+# Gathering Zillow Data
+
+We load in 3 custom functions that we will use to build a dataframe from the Zillow API calls. 
+
+* `appendVariable` - a helper function. It appends a value or an `NA` as appropriate to a list. It is used by the `getAllVariables` function  
+* `getAllVariables` - a helper function. It adds a value for each variable we are tracking to the appropriate list. It is called by the `buildZillowTable` function  
+* `buildZillowTable` - this is the main function. It takes in the sample of addresses and queries the Zillow API for each address. If an address returns information including a Zestimate value, the function extracts all the information it can from that address. After querying each address on the list it combines all the information it has collected into a data frame.  
+```{r, eval=FALSE}
+# adds variable to our list of variables, or adds NA if zillow does not have a value for that variable
+appendVariable <- function(variable, vector) {
+  x <- ifelse(is_empty(variable), NA, variable)
+  return(append(vector, x))
+}
+
+# adds all variables to our varibable list, or adds NA if no information is provided
+addAllVariables <- function(zillow.data, variable.list) {
+  
+  # get variables from zillow's XML formatted data
+  street.name.num    <- unlist(zillow.data$response[['results']][['result']]
+                              [['address']][['street']])[['children.text.value']]
+  zipcode            <- unlist(zillow.data$response[['results']][['result']]
+                              [['address']][['zipcode']])[['children.text.value']]
+  cityy              <- unlist(zillow.data$response[['results']][['result']]
+                              [['address']][['city']])[['children.text.value']]
+  usecode            <- unlist(zillow.data$response[['results']][['result']]
+                               [['useCode']])[['children.text.value']]
+  region.nam         <- unlist(zillow.data$response[['results']][['result']]
+                               [['localRealEstate']][['region']])[['attributes.name']]
+  region.typ         <- unlist(zillow.data$response[['results']][['result']]
+                               [['localRealEstate']][['region']])[['attributes.type']]
+  lsd                <- unlist(zillow.data$response[['results']][['result']]
+                               [['lastSoldDate']])[['children.text.value']]
+  tax.assessment.yr  <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['taxAssessmentYear']])[['children.text.value']])
+  tax.assessment.val <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['taxAssessment']])[['children.text.value']])
+  yr.built           <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['yearBuilt']])[['children.text.value']])
+  lotsize            <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['lotSizeSqFt']])[['children.text.value']])
+  finishedsqft       <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['finishedSqFt']])[['children.text.value']])
+  bathrms            <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['bathrooms']])[['children.text.value']])
+  bedrms             <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['bedrooms']])[['children.text.value']])
+  lsp                <- as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                          [['lastSoldPrice']])[['children.text.value']]) 
+  # the zindex value is a neighborhood average price
+  zindex             <- as.numeric(gsub(',', '', unlist(zillow.data$response[['results']]
+                                                        [['result']][['localRealEstate']]
+                                                        [['region']][['zindexValue']])
+                                        [['children.text.value']])) # gsub() to remove commas
+  
+  # for each variable above, append variable value to appropriate vector, 
+  # or appends NA if value is missing 
+  variable.list$street.name.and.number <- appendVariable(street.name.num, variable.list$street.name.and.number)
+  variable.list$zip.code               <- appendVariable(zipcode, variable.list$zip.code)
+  variable.list$city                   <- appendVariable(cityy, variable.list$city)
+  variable.list$use.code               <- appendVariable(usecode, variable.list$use.code)
+  variable.list$tax.assessment.year    <- appendVariable(tax.assessment.yr, 
+                                                         variable.list$tax.assessment.year)
+  variable.list$tax.assessment.value   <- appendVariable(tax.assessment.val, 
+                                                         variable.list$tax.assessment.value)
+  variable.list$year.built             <- appendVariable(yr.built, variable.list$year.built)
+  variable.list$lot.size               <- appendVariable(lotsize, variable.list$lot.size)
+  variable.list$finished.sqft          <- appendVariable(finishedsqft, variable.list$finished.sqft)
+  variable.list$bathrooms              <- appendVariable(bathrms, variable.list$bathrooms)
+  variable.list$bedrooms               <- appendVariable(bedrms, variable.list$bedrooms)
+  variable.list$region.name            <- appendVariable(region.nam, variable.list$region.name)
+  variable.list$region.type            <- appendVariable(region.typ, variable.list$region.type)
+  variable.list$last.sold.date         <- appendVariable(lsd, variable.list$last.sold.date)
+  variable.list$last.sold.price        <- appendVariable(lsp, variable.list$last.sold.price)
+  variable.list$zindex.value           <- appendVariable(zindex, variable.list$zindex.value)
+  # the zindex.value is a neighborhood average price
+  
+  return(variable.list)
+}
+
+# main function for the data collection portion of this project 
+# for a data frame of addresses, query zillow for information and
+# if a zestimate is present, add data to output
+# outputs a data frame
+buildZillowTable <- function(sample, key) {
+  
+  # initialize an empty vector for each variable and put all vectors in a list 
+  variable.list <- list(zestimate.amount       = numeric(), 
+                        street.name.and.number = character(),
+                        zip.code               = character(),
+                        city                   = character(),
+                        use.code               = character(),
+                        tax.assessment.year    = numeric(),
+                        tax.assessment.value   = numeric(),
+                        year.built             = numeric(),
+                        lot.size               = numeric(),
+                        finished.sqft          = numeric(),
+                        bathrooms              = numeric(),
+                        bedrooms               = numeric(),
+                        region.name            = character(),
+                        region.type            = character(),
+                        last.sold.date         = character(),
+                        last.sold.price        = numeric(),
+                        zindex.value           = numeric()
+                        # the zindex.value is a neighborhood average price
+                        )
+
+  # query zillow for each address in sample
+  # typically we would use an apply() function rather than a for loop for the added speed, 
+  # but the Zillow API does not allow for more than one call at a time
+  # using an apply() function would give an error in this case
+  for (i in 1:nrow(address.sample)) {
+      zillow.data <- ZillowR::GetDeepSearchResults(address = address.sample$clean.address[i], 
+                                          citystatezip = address.sample$clean.citystatezip[i],
+                                          zws_id = key)
+
+      # check zestimate. sometimes the zestimate is missing, sometimes it returns an error
+      zestimate <- try(as.numeric(unlist(zillow.data$response[['results']][['result']]
+                                         [['zestimate']][['amount']])
+                                  [['children.text.value']]), silent = TRUE)
+  
+      # if zestimate is empty or returns an error, do not record any information for this address. 
+      # Move to next iteration instead
+      if('try-error' %in% class(zestimate)) next
+      if(is_empty(zestimate)) next
+  
+      # if zestimate exsts, add it to our list and and add values for all other variables
+      else {
+        variable.list$zestimate.amount <- appendVariable(zestimate, variable.list$zestimate.amount)
+        variable.list <- addAllVariables(zillow.data, variable.list)
+    }
+  }
+
+  # when all sample has been processed, combine vectors into data frame
+  df <- as.data.frame(variable.list)
+  return(df)
+}
+```
+
+With these functions we are ready to build a data frame from the Zillow API. Once it is built, we write the data to 2 CSV files. The first file is a new CSV file with the information we just gathered. The second is a 'Master List' CSV file that we append to. By appending every time we run the script over multiple days, we are able to construct a larger dataset than we would have been able to in one day (remember, the Zillow API limits us to 5000 queries per day). 
+```{r, eval=FALSE}
+df <- buildZillowTable(address.sample, key)
+
+# write data frame to csvs
+write_csv(df, 'LAzillowSample.csv')
+write_csv(df, 'LABigSample.csv', append = TRUE)
+```
+
+# Exploratory Data Analysis
+
+We load in a data set containing three days worth of Zillow API queries made in the above manner. After cleaning the data into the proper format, we look at the structure of the data.
+
+```{r, message=FALSE}
+home.data <- read_csv('LABigSample.csv')
+
+# clean data set into correct format
+home.data <- home.data %>% mutate(city = as.factor(city),
+                                  zip.code = as.factor(zip.code),
+                                  use.code = as.factor(use.code), 
+                                  tax.assessment.year = as.factor(tax.assessment.year), 
+                                  region.name = as.factor(region.name), 
+                                  region.type = as.factor(region.type),
+                                  last.sold.date = as.Date(last.sold.date, '%m/%d/%Y'))
+str(home.data)
+```
+**Some interesting notes from this table:** `region.name` seems to be much more granular than `city`, with 112 levels versus `city`'s 59 levels. The granularity of `zip.code` is close to that of `region.name` (109 levels vs 112 levels). The `tax.assessment.year` variable has only one value (2019). We will drop this column later as it does not provide our model with any useful information.
+
+Now let's look at the correlations between our numeric variables
+
+```{r, echo=FALSE}
+cor <- cor(select(home.data, zestimate.amount, tax.assessment.value:bedrooms, last.sold.price:zindex.value),
+           use = 'na.or.complete', method = 'pearson')
+corrplot::corrplot(cor, method = 'number', type = 'upper')
+```
+
+
+Let's take a look at the scatterplot of the variable most strongly correlated with zestimate amount, `tax.assessment.value`. 
+
+```{r, warning=FALSE, echo=FALSE}
+p <- ggplot(home.data, aes(x=zestimate.amount, y=tax.assessment.value)) +
+     geom_point(shape=19, alpha = 0.15) +    
+     geom_smooth(method=lm) + 
+     labs(x = 'Zestimate Amount',
+          y = 'Tax Assessment Value') +
+     scale_x_continuous(labels = dollar) +
+     scale_y_continuous(labels = dollar) 
+p
+```
+
+
+We should zoom in on the data clustered together at the more typical home values.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+p <- p + scale_x_continuous(label=dollar, limits = c(0, 5000000)) +
+         scale_y_continuous(label=dollar, limits = c(0, 5000000)) +
+         geom_abline(slope=1, intercept=0) # add the y = x line
+
+p
+```
+
+I have added the y=x line (in black) for reference. Notice that the `tax.assessment.value` is almost always less than the `zestimate.amount`. This is probably due to the infamous California [Proposition 13](https://en.wikipedia.org/wiki/1978_California_Proposition_13), which limits the taxable value of a home to the purchase price plus no more than a 2% annual increase. Consequently, people who have owned their homes for a long time pay tax at a rate that is much lower than the market value. For this reason, although `tax.assessment.value` is strongly correlated with `zeestimate.amount`, it is not going to give us an easy answer.
+
+# Data Cleaning
+
+Before we build our model we need to deal with the missing data points and the sparse classes within our data set. 
+
+## Missing Data
+
+First we take care of the missing data. We calculate the total number of rows that have any missing data, and the total amount of each column that is missing.
+
+```{r, echo=FALSE}
+# how much of our data has one or more NA values? 
+paste0(round(1-nrow(na.omit(home.data))/nrow(home.data),3)*100, '% of our data has a missing value')
+
+# look at the percentage of missing data points in each column
+pMiss <- function(x){round(sum(is.na(x))/length(x)*100,2)}
+apply(home.data, 2, FUN=pMiss)
+```
+
+We can see that the `last.sold.date` and `last.sold.price` variables are both missing 32% of their entries. This high percentage, and the nature of the data (even if we were to impute these values, it's unclear what our best guess about a date and price for a transaction that never occured would even mean) make imputation a bad idea. For these reasons, we drop these columns from our analysis along with the `tax.assessment.year` variable with only one level.
+
+After dropping the unneeded columns, we split the data into two parts: our response variable and the rest of the data. That way, when we impute missing values, we are sure that the response variable is not being used in the imputation. 
+
+```{r}
+# drop last.sold columns from data
+home.data <- home.data %>% select(-c(last.sold.date, last.sold.price, tax.assessment.year))
+
+# split our response variable from the rest of home.data
+# so that it is not used to impute missing values
+zestimates <- home.data %>% select(zestimate.amount)
+home.data <- home.data %>% select(-zestimate.amount)
+```
+
+Now we are ready to impute values to our missing data. None of our categorical variables have missing values. If they did we would create a `missing` category for those variables. For the numerical variables we use the `mice` package to impute values. We use the `mice` package's random forest imputation method. 
+
+```{r impute data, cache=TRUE, message=FALSE, warning=FALSE}
+
+imputed <- mice::mice(home.data, method='rf', m=5, maxit = 1, seed = 123)
+home.data <- complete(imputed, 1)
+
+# stitch zestimates back onto the home.data dataset after imputation
+home.data <- home.data %>% mutate('zestimate.amount' = zestimates$zestimate.amount)
+```
+```{r}
+mice::densityplot(imputed)
+```
+
+
+The imputed values (magenta) seem to match the distributions of the actual data (blue) fairly well. The `zindex.value` may be somewhat overrespresented on the lower end of the distribution, but overall it looks like the imputation went very smoothly. We are ready to begin building our models. 
+
+## Sparse Classes
+We need to check our factor levels to make sure no level is too sparse. We want to have at least two instances of each factor level so that we have at least one instance of each level in both our test and training data sets. Let's look at the `use.code` factor first. 
+```{r}
+home.data %>% group_by(use.code) %>%
+  summarize(no_rows = length(use.code)) %>%
+  arrange(no_rows)
+```
+
+We will have to remove the record with the`MultiFamily5Plus` `use.code`. Then we check `region.name`.
+
+```{r}
+home.data <- home.data[!home.data$use.code %in% 'MultiFamily5Plus', ]
+
+home.data %>% group_by(region.name) %>%
+  summarize(no_rows = length(region.name)) %>%
+  arrange(no_rows)
+```
+
+We delete the sparse factor classes from `region.name`. We do the same thing for the `zip.code` and `city` variables as well, renaming cities where there are encoding errors and then deleting the sparse classes. I have performed a check on every other factor class in this data set, but I omit the code from this report for conciseness sake. The printouts for much of this work have been omitted for conciseness sake.
+
+```{r}
+home.data <- home.data[!home.data$region.name %in% c('Beverly Hills Gateway', 'Canyon Country',
+                                                     'Chinatown', 'East Los Angeles', 
+                                                     'El Miradero', 'Elysian Park', 'West Carson'), ]
+
+# recode the obvious mis-casings to the correct case
+home.data <- home.data %>% mutate(city = fct_recode(city, 'Los Angeles' = 'Los Angeles CA',
+                                                    'North Hills' = 'North hills',
+                                                    'North Hollywood' = 'North hollywood',
+                                                    'Playa Del Rey' = 'Playa del rey',
+                                                    'West Hills' = 'WEST HILLS',
+                                                    'North Hollywood' = 'N Hollywood',
+                                                    'San Pedro' = 'San pedro',
+                                                    'Woodland Hills' = 'Woodland hills'))
+
+# remove the sparse cities
+home.data <- home.data[!home.data$city %in% c('Eagle Rock', 'Hollywood', 'Lake Balboa',
+                                              'Lake View Terrace', 'Shadow Hills',
+                                              'Westchester') ,]
+# remove the sparse zip code
+home.data <- home.data[!home.data$zip.code %in% '90010', ]
+
+```
+
+Now that the dataset has been built, we save it as CSV file here for easy loading later, and clear the memory. 
+```{r}
+write_csv(home.data, 'home-data.csv')
+
+# clear global environment for memory
+rm(list = ls())
+```
+
+
+# Constructing the Models
+
+```{r, message = FALSE}
+# first load the cached CSV data file
+home.data <- read_csv('home-data.csv')
+```
+
+To begin, we split the data set into training (80%) and testing (20%) sets. We drop the `street.name.and.number` variable to prevent overfitting. To partition the data we use the caret `createDataPartition` funciton rather than the `sample` function because caret can automatically stratify the data along the `region.name` variable, ensuring we have at least one instance of each `region.name` in our training and test sets. This is necessary for ensuring we have at least one sample of each class in both the testing and training sets.
+
+```{r split test train, message=FALSE}
+set.seed(44)
+# partition data along region.name for both datasets 
+train <- caret::createDataPartition(home.data$region.name, p = 0.8, list = FALSE)
+
+# create test and training sets for home.data
+train.set <- home.data[train, ] %>% select(-street.name.and.number)
+test.set <- home.data[-train, ] %>% select(-street.name.and.number)
+```
+
+Our`home.data` dataset has 6585 observations in the training set and 1591 in the test set. 
+
+## Linear Regression Model
+```{r OLS regression}
+# fit full linear models for both data sets
+linear.fit.all <- lm(zestimate.amount ~ ., data = train.set)
+
+# show most important variables
+variable.importance <- caret::varImp(linear.fit.all) %>% 
+  rownames_to_column(var = 'Variable') %>% 
+  arrange(desc(Overall))
+
+head(variable.importance, n = 20)
+```
+
+We see that the most useful variables to the model are `tax.assessment.value`, `finished.sqft`, `year.built`, and `bedrooms`. We will build a regression model using automated backward feature selection to get a baseline model to compare to more sophisticated models. 
+
+```{r}
+linear.fit <- MASS::stepAIC(linear.fit.all, direction = 'backward', trace=FALSE)
+```
+
+We compare the Root MSE of both models on the test data sets to compare their performance. 
+```{r}
+findRootMSE <- function(fit, data) {
+  pred <- predict(fit, newdata = data)
+  return(sqrt(sum((pred - data$zestimate.amount)^2)/nrow(data)))
+}
+
+c('Test Error' = findRootMSE(linear.fit, test.set),
+                  'Training Error' = findRootMSE(linear.fit, train.set))
+```
+
+We will use the `linear.fit` model as our baseline comparison model against an elastic net model and a boosted tree model. 
+
+## Elastic Net Model
+
+An elastic net model combines ridge regression (which uses L2 regularization to penalize regression coefficients far from zero) with LASSO regression (which uses L1 regularization to penalize coefficients far from zero and performs a version of feature selection but automatically setting coefficients to zero). The goal is to decrease the variance of an Ordinary Least Squares regression model by allowing for some added bias. 
+
+For the elastic net model we use the `caret` package to tune the alpha hyperparameter, while the `glmnet` package tunes the lambda hyperparameter. 
+```{r Elastic Net, cache=TRUE, warning=FALSE}
+# Set training control
+# we test each model with 10 fold cross validation repeated 3 times
+trainCtrl <- caret::trainControl(method = 'repeatedcv', number = 10, repeats = 3)
+
+# Train the model
+elastic.net.fit <- caret::train(zestimate.amount ~ .,
+                           data = train.set,
+                           method = "glmnet",
+                           preProcess = c("center", "scale"),
+                           tuneLength = 25,
+                           trControl = trainCtrl)
+
+```
+
+Let's compare the Root MSE of the elastic net model to the Root MSE of the regular regression model.
+```{r}
+findRootMSE(elastic.net.fit, test.set)
+```
+
+```{r, echo=FALSE}
+RMSE.improvement.percent <- (findRootMSE(linear.fit, test.set) - findRootMSE(elastic.net.fit, test.set)) /
+  findRootMSE(linear.fit, test.set) * 100
+
+print(paste0('The elastic net model has a Root MSE that is ', round(RMSE.improvement.percent,2), '% less than the linear regression model with backward feature selection.'))
+```
+
+The elastic net model is an improvement over the ordinary least squares model, but I bet we can do better with a tree-based model. 
+
+## Boosted Tree Model
+
+```{r Boosted Tree, cache=TRUE, warning=FALSE, message=FALSE}
+# We use the same trainControl as in the Elastic Net model (10-fold CV repeated 3 times)
+
+# we use tuneGrid to test all specified combinations of our 4 hyperparameters
+tgrid <- expand.grid(n.trees = c(100, 200, 300, 400, 500, 600, 800, 1000, 
+                                 1500, 2000, 2500, 3000, 3500, 4000),
+                            interaction.depth = c(4, 6),
+                            shrinkage = c(.01, .02, .05),
+                            n.minobsinnode = c(3, 4))
+
+# use capture.output to suppress tons of unwanted 
+# printing output lines for the boosted tree model.
+# the tree trains as normal
+# we train one tree with all for each dataset with all available variables
+data.dump <- capture.output(boosted.tree.fit <- 
+                              caret::train(zestimate.amount ~ use.code + tax.assessment.value + 
+                                             year.built + finished.sqft + bedrooms + region.name +
+                                             zindex.value, 
+                                           data = train.set,
+                                           method = 'gbm', 
+                                           trControl = trainCtrl,
+                                           preProcess = c('center', 'scale'),
+                                           tuneGrid = tgrid))
+
+```
+
+```{r}
+# now we plot the tree fits to visualize how they are performing
+boosted.tree.fit$bestTune
+plot(boosted.tree.fit)
+
+c('Test RMSE' = findRootMSE(boosted.tree.fit, test.set))
+
+RMSE.improvement.percent <- (findRootMSE(linear.fit, test.set) - findRootMSE(boosted.tree.fit, test.set)) /
+  findRootMSE(linear.fit, test.set) * 100
+
+print(paste0('The boosted tree model has a RMSE that is ', round(RMSE.improvement.percent,2), '% less than the linear regression model with backward feature selection.'))
+```
+
+Now we compare the results of our three models. 
+```{r}
+findRootMSE(linear.fit, test.set)
+findRootMSE(elastic.net.fit, test.set)
+findRootMSE(boosted.tree.fit, test.set)
+```
+
+As expected, the boosted tree model outperformed the linear regression model and the elastic net model. 
+
+# Conclusion
+
+The best model we were able to create has a root mean squared error of about \$410,000. That means that the mean distance from our predicted Zestimate value to the actual Zestimate value is more than \$0,000. For comparison, look at the summary data for the `zestimate.amount` column:
+```{r, echo=FALSE}
+summary(home.data$zestimate.amount)
+```
+
+With a median of about \$776,000, the root MSE is about 53% of the median value. I think there is still room for improvement here. Perhaps with more processing power and time, collecting different variables, or a larger sample size we could come up with a model that performs better, and gives us predictions closer to Zillow's. 
+
+Look at the scatterplot of the actual zestimate values vs our predicted zestimate value below. The regression line for the model (in blue) is consistently close to the 'correct' line (in black). The axes are log scaled. The model does not appear to be consistently over or under estimating zestimate values. 
+```{r, echo=FALSE}
+actual.vs.predicted <- as.data.frame(list(x = predict(boosted.tree.fit, newdata = test.set), 
+                                          y = test.set$zestimate.amount))
+
+ggplot(actual.vs.predicted, aes(x=x, y=y)) + geom_point(alpha = .3) + 
+  geom_abline(slope = 1, intercept = 0, size = 1) + 
+  geom_smooth(method = 'loess') +
+  scale_x_continuous(label=dollar, trans = 'log') + 
+  scale_y_continuous(label=dollar, trans = 'log') + 
+  labs(title = 'Zestimate Value vs Predicted Zestiamte (Log Scale)', x = 'Actual Zestimate', y = 'Predicted Zestimate')
+```
