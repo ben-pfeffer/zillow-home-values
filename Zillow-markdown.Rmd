@@ -13,7 +13,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(scales)
-key <- 'X1-ZWz1h7m2yrx72j_6bk45'
+key <- 'XXXXXXXXXXXXXXXXXXXXXXXX'
 ```
 
 # Introduction
