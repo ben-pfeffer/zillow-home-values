@@ -1,7 +1,7 @@
 ---
 title: "Zillow Home Values"
 author: "Ben Pfeffer"
-date: "March 7, 2020"
+date: "March 19, 2020"
 output: 
   html_document:
     toc: TRUE
@@ -18,7 +18,7 @@ key <- 'XXXXXXXXXXXXXXXXXXXXXXXX'
 
 # Introduction
 
-In this project we will build a few models that attempt to predict the Zillow Zestimate home value of houses in the city of Los Angeles. 
+In this project we will build a few models that attempt to predict the Zillow Zestimate home value of houses in the city of Los Angeles. The code for this project is [on GitHub](https://github.com/ben-pfeffer/zillow-home-values)
 
 We begin with a CSV of all the home addresses in the city. This file is provided publically by the city of Los Angeles. You can view or download it [here](https://data.lacity.org/A-Well-Run-City/Addresses-in-the-City-of-Los-Angeles/4ca8-mxuh). 
 
