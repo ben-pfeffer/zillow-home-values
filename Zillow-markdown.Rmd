@@ -1,7 +1,7 @@
 ---
 title: "Zillow Home Values"
 author: "Ben Pfeffer"
-date: "March 19, 2020"
+date: "March 20, 2020"
 output: 
   html_document:
     toc: TRUE
@@ -524,7 +524,7 @@ As expected, the boosted tree model outperformed the linear regression model and
 
 # Conclusion
 
-The best model we were able to create has a root mean squared error of about \$410,000. That means that the mean distance from our predicted Zestimate value to the actual Zestimate value is more than \$0,000. For comparison, look at the summary data for the `zestimate.amount` column:
+The best model we were able to create has a root mean squared error of about \$410,000. That means that the mean distance from our predicted Zestimate value to the actual Zestimate value is more than \$400,000. For comparison, look at the summary data for the `zestimate.amount` column:
 ```{r, echo=FALSE}
 summary(home.data$zestimate.amount)
 ```

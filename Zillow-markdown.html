@@ -12,6 +12,7 @@
 
 <meta name="author" content="Ben Pfeffer" />
 
+<meta name="date" content="2020-03-20" />
 
 <title>Zillow Home Values</title>
 
@@ -249,14 +250,14 @@ div.tocify {
 
 <h1 class="title toc-ignore">Zillow Home Values</h1>
 <h4 class="author">Ben Pfeffer</h4>
-<h4 class="date">March 7, 2020</h4>
+<h4 class="date">March 20, 2020</h4>
 
 </div>
 
 
 <div id="introduction" class="section level1">
 <h1>Introduction</h1>
-<p>In this project we will build a few models that attempt to predict the Zillow Zestimate home value of houses in the city of Los Angeles.</p>
+<p>In this project we will build a few models that attempt to predict the Zillow Zestimate home value of houses in the city of Los Angeles. The code for this project is <a href="https://github.com/ben-pfeffer/zillow-home-values">on GitHub</a></p>
 <p>We begin with a CSV of all the home addresses in the city. This file is provided publically by the city of Los Angeles. You can view or download it <a href="https://data.lacity.org/A-Well-Run-City/Addresses-in-the-City-of-Los-Angeles/4ca8-mxuh">here</a>.</p>
 <p>We will clean this data and use it to query the Zillow API for information on the homes. Since it is not feasable to query Zillow for every address in LA, we take a random sample from the list of addresses. We use the addresses in that sample to query the Zillow API. Information on homes that have at least a Zillow Zestimate value are written to a CSV file.</p>
 <p>The Zillow API will give us data on home’s Zestimate value, its tax assessment value, and many properties of the home including square footage, number of bedrooms and bathrooms, year built, and home type (ie single family, duplex, or condo). We will use these factors to train a model that predicts a home’s Zillow Zestimate value.</p>
@@ -311,18 +312,18 @@ address.sample &lt;- mutate(address.sample, clean.address = paste0(HSE_NBR, ' ',
 
 address.sample</code></pre>
 <pre><code>## # A tibble: 5,000 x 2
-##    clean.address              clean.citystatezip   
-##    &lt;chr&gt;                      &lt;chr&gt;                
-##  1 &quot;4009  DON FELIPE DR &quot;     Los Angeles, CA 90008
-##  2 &quot;600  ORME AVE &quot;           Los Angeles, CA 90023
-##  3 &quot;11232  WOODLEY AVE &quot;      Los Angeles, CA 91344
-##  4 &quot;1545  238TH ST &quot;          Los Angeles, CA 90710
-##  5 &quot;7848  HINDRY AVE &quot;        Los Angeles, CA 90045
-##  6 &quot;407  LA FAYETTE PARK PL &quot; Los Angeles, CA 90026
-##  7 &quot;18765  STRATHERN ST &quot;     Los Angeles, CA 91335
-##  8 &quot;12381  NUGENT DR &quot;        Los Angeles, CA 91344
-##  9 &quot;830  105TH ST &quot;           Los Angeles, CA 90044
-## 10 &quot;1919  5TH AVE &quot;           Los Angeles, CA 90018
+##    clean.address             clean.citystatezip   
+##    &lt;chr&gt;                     &lt;chr&gt;                
+##  1 &quot;6809  QUINTON LANE &quot;     Los Angeles, CA 91042
+##  2 &quot;326  BRONSON AVE &quot;       Los Angeles, CA 90004
+##  3 &quot;1621 1/2 CAHUENGA BLVD &quot; Los Angeles, CA 90028
+##  4 &quot;231  LUCAS AVE &quot;         Los Angeles, CA 90026
+##  5 &quot;7408  OSTROM AVE &quot;       Los Angeles, CA 91406
+##  6 &quot;13665  WOODCOCK AVE &quot;    Los Angeles, CA 91342
+##  7 &quot;2342  ELMGROVE ST &quot;      Los Angeles, CA 90031
+##  8 &quot;300  RENO ST &quot;           Los Angeles, CA 90057
+##  9 &quot;1826  WASHINGTON WAY &quot;   Los Angeles, CA 90291
+## 10 &quot;215  CATALINA ST &quot;       Los Angeles, CA 90004
 ## # ... with 4,990 more rows</code></pre>
 <p>The code above pastes the columnar data together in the correct order. For variables that are not always present (House Fraction Number and Street Directional Suffix) we conditionally input them only when they are present.</p>
 <p><strong>One note about this setup:</strong> we do not need to specify a unit for the multifamily addresses. The Zillow API returns information on all units at a address when no unit is supplied, and the code that follows will return the information for the first unit that Zillow gives us. Consequentially, multifamily units may be underrepresented in the sample as a percentage of total <em>dwellings</em>–but not as a percentage of total <em>buildings</em>. The sample may also be slightly unrepresentative if the first unit in a multifamily building tends to be larger or smaller than the other units. However, for the purposes of this project I think our method is sufficient for building a predictive model.</p>
@@ -699,6 +700,12 @@ elastic.net.fit &lt;- caret::train(zestimate.amount ~ .,
                            preProcess = c(&quot;center&quot;, &quot;scale&quot;),
                            tuneLength = 25,
                            trControl = trainCtrl)</code></pre>
+<pre><code>## Loading required package: lattice</code></pre>
+<pre><code>## 
+## Attaching package: 'caret'</code></pre>
+<pre><code>## The following object is masked from 'package:purrr':
+## 
+##     lift</code></pre>
 <p>Let’s compare the Root MSE of the elastic net model to the Root MSE of the regular regression model.</p>
 <pre class="r"><code>findRootMSE(elastic.net.fit, test.set)</code></pre>
 <pre><code>## [1] 571304.4</code></pre>
@@ -755,7 +762,7 @@ print(paste0('The boosted tree model has a RMSE that is ', round(RMSE.improvemen
 </div>
 <div id="conclusion" class="section level1">
 <h1>Conclusion</h1>
-<p>The best model we were able to create has a root mean squared error of about $410,000. That means that the mean distance from our predicted Zestimate value to the actual Zestimate value is more than $0,000. For comparison, look at the summary data for the <code>zestimate.amount</code> column:</p>
+<p>The best model we were able to create has a root mean squared error of about $410,000. That means that the mean distance from our predicted Zestimate value to the actual Zestimate value is more than $400,000. For comparison, look at the summary data for the <code>zestimate.amount</code> column:</p>
 <pre><code>##     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
 ##   112353   597374   776182  1114708  1241456 61013558</code></pre>
 <p>With a median of about $776,000, the root MSE is about 53% of the median value. I think there is still room for improvement here. Perhaps with more processing power and time, collecting different variables, or a larger sample size we could come up with a model that performs better, and gives us predictions closer to Zillow’s.</p>
