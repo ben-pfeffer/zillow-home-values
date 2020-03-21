@@ -541,5 +541,5 @@ ggplot(actual.vs.predicted, aes(x=x, y=y)) + geom_point(alpha = .3) +
   geom_smooth(method = 'loess') +
   scale_x_continuous(label=dollar, trans = 'log') + 
   scale_y_continuous(label=dollar, trans = 'log') + 
-  labs(title = 'Zestimate Value vs Predicted Zestiamte (Log Scale)', x = 'Actual Zestimate', y = 'Predicted Zestimate')
+  labs(title = 'Zestimate Value vs Predicted Zestimate (Log Scale)', x = 'Actual Zestimate', y = 'Predicted Zestimate')
 ```
